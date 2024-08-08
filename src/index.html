@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Raycasting Visualization</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+        import * as CANNON from 'cannon-es';
+        import GUI from 'lil-gui';
+        import CannonDebugger from 'cannon-es-debugger';
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Axis Helper 추가
+        const axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+
+        // 카메라 위치 설정
+        camera.position.y = 3;
+        camera.position.z = 10;
+
+        // OrbitControls 추가
+        const controls = new OrbitControls(camera, renderer.domElement);
+
+        // 바구니 생성
+        const basketThickness = 0.1; // 바구니 두께 설정
+        const basketHeight = 3; // 바구니 높이 설정
+        const basketTopRadius = 1.5; // 바구니 상단 반지름 설정
+        const basketBottomRadius = 1.0; // 바구니 하단 반지름 설정
+        const basketPosition = { x: 0, y: basketHeight / 2, z: 0 };
+        const tiltedDegree = Math.atan((basketTopRadius - basketBottomRadius) / basketHeight) * (180 / Math.PI);
+
+        // 바구니 외벽 생성
+        const outerGeometry = new THREE.CylinderGeometry(basketTopRadius, basketBottomRadius, basketHeight, 32, 1, true);
+        const outerMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+        const outerMesh = new THREE.Mesh(outerGeometry, outerMaterial);
+
+        // 바구니 내벽 생성
+        const innerGeometry = new THREE.CylinderGeometry(basketTopRadius - basketThickness, basketBottomRadius - basketThickness, basketHeight, 32, 1, true);
+        const innerMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+        const innerMesh = new THREE.Mesh(innerGeometry, innerMaterial);
+
+        // 바구니 바닥 생성
+        const bottomGeometry = new THREE.CylinderGeometry(basketBottomRadius, basketBottomRadius, basketThickness, 32);
+        const bottomMaterial = new THREE.MeshBasicMaterial({ color: 0x0000ff });
+        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+        bottomMesh.position.y = -basketPosition.y;
+
+        const basket = new THREE.Group();
+        basket.add(outerMesh);
+        basket.add(innerMesh);
+        basket.add(bottomMesh);
+        basket.position.copy(basketPosition); // 바구니 위치 설정
+        scene.add(basket);
+
+        // 물리 엔진 초기화
+        const world = new CANNON.World();
+        world.gravity.set(0, -9.82, 0);
+
+        // 100 x 100 크기의 평면 바닥 생성
+        const floorGeometry = new THREE.PlaneGeometry(100, 100);
+        const floorMaterial = new THREE.MeshBasicMaterial({ color: 0x808080, side: THREE.DoubleSide });
+        const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+        floorMesh.rotation.x = -Math.PI / 2;
+        scene.add(floorMesh);
+
+        // 물리 엔진에 바닥 추가
+        const floorShape = new CANNON.Plane();
+        const floorBody = new CANNON.Body({ mass: 0 });
+        floorBody.addShape(floorShape);
+        floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        world.addBody(floorBody);
+
+        // 바구니 물리 Body 생성
+        const basketBody = new CANNON.Body({
+            mass: 100, // 질량 설정
+            position: new CANNON.Vec3(basketPosition.x, basketPosition.y, basketPosition.z)
+        });
+
+        // 바구니 바닥 물리 Shape 생성
+        const basketBottomShape = new CANNON.Cylinder(basketBottomRadius, basketBottomRadius, basketThickness, 32);
+        basketBody.addShape(basketBottomShape, new CANNON.Vec3(0, -basketHeight / 2, 0));
+
+        // 바구니 벽 물리 Shape 생성
+        const segments = 16;
+        const basketWalls = [];
+        for (let i = 0; i < segments; i++) {
+            const angle = THREE.MathUtils.degToRad(i * 360 / segments);
+
+            const offset = 1 - basketThickness * 2;
+            const x = Math.sin(angle) * basketTopRadius * offset;
+            const z = Math.cos(angle) * basketTopRadius * offset;
+
+            const width = Math.PI * basketTopRadius / segments;
+            basketWalls.push({
+                shape: new CANNON.Box(new CANNON.Vec3(width, basketHeight / 2, basketThickness / 2)),
+                position: new CANNON.Vec3(x, 0, z),
+                angle: angle
+            });
+        }
+
+        basketWalls.forEach(wall => {
+            const quaternion = new CANNON.Quaternion();
+            quaternion.setFromEuler(THREE.MathUtils.degToRad(tiltedDegree), wall.angle, 0, 'YXZ');
+            basketBody.addShape(wall.shape, wall.position, quaternion);
+        });
+
+        world.addBody(basketBody);
+
+        // 랜덤한 큐브 10개 추가
+        const cubes = [];
+        const cubeBodies = [];
+        for (let i = 0; i < 100; i++) {
+            const size = {
+                x: Math.random() * 0.3 + 0.1,
+                y: Math.random() * 0.3 + 0.1,
+                z: Math.random() * 0.3 + 0.1
+            };
+
+            const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+            const material = new THREE.MeshBasicMaterial({ color: Math.random() * 0xffffff });
+            const cube = new THREE.Mesh(geometry, material);
+
+            // 큐브 위치 랜덤 설정 (바구니 내부)
+            cube.position.set(
+                (Math.random() - 0.5) * (basketBottomRadius - basketThickness - size.x) * 2,
+                Math.random() * basketHeight - (basketHeight - size.y) / 2 + 3,
+                (Math.random() - 0.5) * (basketBottomRadius - basketThickness - size.y) * 2
+            );
+            cubes.push(cube);
+            scene.add(cube);
+
+            // 물리 엔진에 큐브 추가
+            const cubeShape = new CANNON.Box(new CANNON.Vec3(size.x / 2, size.y / 2, size.z / 2));
+            const cubeBody = new CANNON.Body({
+                mass: 1, // 질량 설정
+                position: new CANNON.Vec3(cube.position.x, cube.position.y, cube.position.z),
+            });
+            cubeBody.uuid = cube.uuid;
+            
+            cubeBody.addShape(cubeShape);
+            cubeBodies.push(cubeBody);
+            world.addBody(cubeBody);
+        }
+
+        // CannonDebugger 추가
+        const cannonDebugger = new CannonDebugger(scene, world);
+
+        // lil-gui setup
+        const gui = new GUI();
+        const debugFolder = gui.addFolder('Debug');
+
+        debugFolder.open();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 물리 엔진 업데이트
+            world.step(1 / 60);
+
+            // 바구니 위치 및 회전 업데이트
+            basket.position.copy(basketBody.position);
+            basket.quaternion.copy(basketBody.quaternion);
+
+            // 큐브 위치 및 회전 업데이트
+            cubes.forEach((cube, index) => {
+                cube.position.copy(cubeBodies[index].position);
+                cube.quaternion.copy(cubeBodies[index].quaternion);
+            });
+
+            // Update debugger
+            cannonDebugger.update();
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // 창 크기 조절 시 카메라 및 렌더러 업데이트
+        window.addEventListener('resize', function() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 일정 시간 후 바구니에 힘 적용
+        setTimeout(() => {
+            basketBody.applyTorque(new CANNON.Vec3(100000, 0, 0));
+        }, 3000); // 3초 후 힘 적용
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        let selectedCube = null;
+
+        function onMouseMove(event) {
+            // 마우스 위치를 정규화된 장치 좌표(-1에서 +1)로 변환
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Raycaster 업데이트
+            raycaster.setFromCamera(mouse, camera);
+
+            // 교차 확인
+            const intersects = raycaster.intersectObjects(cubes);
+
+            if (selectedCube) {
+                const intersectPlane = raycaster.intersectObject(floorMesh)[0];
+                if (intersectPlane) {
+                    const newPosition = intersectPlane.point;
+                    const cubeHeight = selectedCube.geometry.parameters.height;
+                    selectedCube.position.set(newPosition.x, cubeHeight / 2, newPosition.z);
+                    const selectedBody = cubeBodies.find(body => body.uuid === selectedCube.uuid);
+                    selectedBody.position.set(newPosition.x, cubeHeight / 2, newPosition.z);
+                }
+            } else {
+                if (intersects.length > 0) {
+                    document.body.style.cursor = 'pointer';
+                } else {
+                    document.body.style.cursor = 'default';
+                }
+            }
+        }
+
+        function onMouseDown(event) {
+            // 마우스 위치를 정규화된 장치 좌표(-1에서 +1)로 변환
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Raycaster 업데이트
+            raycaster.setFromCamera(mouse, camera);
+
+            // 교차 확인
+            const intersects = raycaster.intersectObjects(cubes);
+
+            if (selectedCube) {
+                const selectedBody = cubeBodies.find(body => body.uuid === selectedCube.uuid);
+                selectedBody.type = CANNON.Body.DYNAMIC; // 물리 엔진 비활성화
+                selectedCube = null;
+            } else {
+                if (intersects.length > 0) {
+                    selectedCube = intersects[0].object;
+                    const selectedBody = cubeBodies.find(body => body.uuid === selectedCube.uuid);
+                    selectedBody.type = CANNON.Body.STATIC; // 물리 엔진 비활성화
+                }
+            }
+        }
+
+        window.addEventListener('mousemove', onMouseMove, false);
+        window.addEventListener('mousedown', onMouseDown, false);
+    </script>
+</body>
+</html>
